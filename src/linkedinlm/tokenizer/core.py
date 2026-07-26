@@ -1,5 +1,5 @@
 from collections.abc import Mapping, Sequence
-
+import unicodedata
 Pair = tuple[int, int]
 
 def count_pairs(token_ids: Sequence[int])-> dict[Pair, int]:
@@ -44,3 +44,21 @@ def merge_pair(
             new_token_ids.append(token_ids[i])
             i += 1
     return new_token_ids
+
+
+
+def replace_control_characters(s: str) -> str:
+    """Replace control characters in a string with their Unicode escape sequences."""
+    chars = []
+    for ch in s:
+        if unicodedata.category(ch)[0] != "C":
+            chars.append(ch) # this character is ok
+        else:
+            chars.append(f"\\u{ord(ch):04x}") # escape
+    return "".join(chars)
+
+def render_token(t:bytes) -> str:
+    """pretty print, escaping control chars"""
+    s = t.decode("utf-8", errors="replace")
+    s = replace_control_characters(s)
+    return s
