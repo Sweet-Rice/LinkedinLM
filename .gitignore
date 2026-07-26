@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+/scripts/generate_dataset.py
+
+
+.venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+/data/
+/DATASET_CARD.md
