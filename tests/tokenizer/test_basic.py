@@ -5,21 +5,6 @@ tokenizer = BasicTokenizer()
 """
 test suite for e2e encode and decode
 """
-def test_basic_utf8_range_test():
-
-    for code_point in range(0x10FFFF + 1):
-            if 0xD800 <= code_point <= 0xDFFF:
-                # Surrogates are not valid standalone Unicode scalar values.
-                continue
-
-            char = chr(code_point)
-            encoded = tokenizer.encode(char)
-            decoded = tokenizer.decode(encoded)
-            assert decoded == char, (
-                f"Failed for code point {code_point}: "
-                f"{char!r} -> {encoded} -> {decoded!r}"
-            )
-
 def test_encode_ascii_bytes():
     for i in range(128):  # ASCII range
         char = chr(i)

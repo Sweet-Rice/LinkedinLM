@@ -22,6 +22,18 @@ class BasicTokenizer:
         
         return vocab 
 
+    def _split_text(self, text: str) -> list[str]:
+        """Return independent pieces across which BPE merges may not occur."""
+        return [text]
+
+    @staticmethod
+    def _count_chunk_pairs(token_chunks: Sequence[Sequence[int]]) -> dict[Pair, int]:
+        pair_counts: dict[Pair, int] = {}
+        for chunk in token_chunks:
+            for pair, count in count_pairs(chunk).items():
+                pair_counts[pair] = pair_counts.get(pair, 0) + count
+        return pair_counts
+
     def train(
         self,
         text: str,
@@ -33,20 +45,23 @@ class BasicTokenizer:
 
         iterations = vocab_size - 256
 
-        text_bytes = text.encode("utf-8")  # Raw UTF-8 bytes, including emoji.
-        token_ids = list(text_bytes)
+        text_chunks = self._split_text(text)
+        token_chunks = [list(chunk.encode("utf-8")) for chunk in text_chunks]
 
         merges: dict[Pair, int] = {}
         vocab = {idx: bytes([idx]) for idx in range(256)}
         for i in range(iterations):
-            pair_counts = count_pairs(token_ids)
+            pair_counts = self._count_chunk_pairs(token_chunks)
             if not pair_counts:
                 break
 
             pair = select_pair(pair_counts)
 
             new_token_id = 256 + i
-            token_ids = merge_pair(token_ids, pair, new_token_id)
+            token_chunks = [
+                merge_pair(chunk, pair, new_token_id)
+                for chunk in token_chunks
+            ]
             merges[pair] = new_token_id
             vocab[new_token_id] = vocab[pair[0]] + vocab[pair[1]]
 
@@ -58,7 +73,6 @@ class BasicTokenizer:
 
         self.merges = merges
         self.vocab = vocab
-
 
     def save(self, path: str )-> None:
         """
@@ -128,13 +142,8 @@ class BasicTokenizer:
         self.special_tokens = special_tokens
         self.vocab = self._build_vocab()           
 
-
-    def encode(self, text: str) -> list[int]:
-        """
-        Encode text as UTF-8 byte IDs, then apply learned merges by rank.
-        """
-        ids = list(text.encode("utf-8"))
-
+    def _encode_chunk(self, text_bytes: bytes) -> list[int]:
+        ids = list(text_bytes)
         while len(ids) >= 2:
             pair_counts = count_pairs(ids)
             learned_pairs = [pair for pair in pair_counts if pair in self.merges]
@@ -146,6 +155,15 @@ class BasicTokenizer:
             ids = merge_pair(ids, pair, new_token_id)
 
         return ids
+
+    def encode(self, text: str) -> list[int]:
+        """
+        Encode independent text pieces as UTF-8 bytes and learned BPE tokens.
+        """
+        token_ids: list[int] = []
+        for chunk in self._split_text(text):
+            token_ids.extend(self._encode_chunk(chunk.encode("utf-8")))
+        return token_ids
 
     def decode(self, token_ids: Sequence[int]) -> str:
         """
