@@ -38,6 +38,8 @@ def test_encode_ascii_bytes():
         "café",  # includes a non-ASCII character
         "こんにちは",  # Japanese greeting
         "😀",  # Emoji
+        "👩🏽‍💻",  # Emoji with skin tone and a zero-width joiner
+        "❤️",  # Emoji containing a variation selector
         "𐍈",  # A character outside the BMP
         "line one\nline two",  # includes a newline
         "tab\tseparated",  # includes a tab
