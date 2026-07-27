@@ -27,3 +27,18 @@ def test_train_learns_and_round_trips_repeated_emoji():
     assert tokenizer.vocab[258] == "🚀".encode("utf-8")
     assert encoded == [258, 258]
     assert tokenizer.decode(encoded) == "🚀🚀"
+
+
+def test_train_reports_merge_progress():
+    tokenizer = linkedinlm.tokenizer.basic.BasicTokenizer()
+    updates: list[tuple[int, int]] = []
+
+    tokenizer.train(
+        "aaaa",
+        vocab_size=258,
+        progress_callback=lambda completed, total: updates.append(
+            (completed, total)
+        ),
+    )
+
+    assert updates == [(1, 2), (2, 2)]

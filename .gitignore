@@ -9,5 +9,6 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+/artifacts/
 /data/
 /DATASET_CARD.md

@@ -1,10 +1,15 @@
-from collections.abc import Sequence
+import re
+from collections.abc import Iterable, Mapping, Sequence, Set as AbstractSet
+from typing import Callable, Literal
 
 from linkedinlm.tokenizer.core import Pair, count_pairs, merge_pair, render_token, select_pair
 
 
+ProgressCallback = Callable[[int, int], None]
+
+
 class BasicTokenizer:
-    merges: dict[Pair, int] 
+    merges: dict[Pair, int]
     vocab: dict[int, bytes]
 
     def __init__(self):
@@ -13,14 +18,43 @@ class BasicTokenizer:
         self.special_tokens = {}
         self.vocab = self._build_vocab()
 
-    def _build_vocab(self) -> dict[int, bytes]: 
+    def _build_vocab(self) -> dict[int, bytes]:
         vocab = {idx: bytes([idx]) for idx in range(256)}  # Initialize with single-byte tokens
         for (p0, p1), idx in self.merges.items():
             vocab[idx] = vocab[p0] + vocab[p1]
         for special, idx in self.special_tokens.items():
             vocab[idx] = special.encode("utf-8")
-        
-        return vocab 
+
+        return vocab
+
+    def register_special_tokens(
+        self,
+        special_tokens: Mapping[str, int],
+    ) -> None:
+        """Replace the registered special-token mapping after validation."""
+        mergeable_ids = set(range(256)) | set(self.merges.values())
+        special_ids: list[int] = []
+
+        for special, token_id in special_tokens.items():
+            if not isinstance(special, str) or not special:
+                raise ValueError("special tokens must be non-empty strings")
+            if any(character in special for character in ("\t", "\n", "\r")):
+                raise ValueError("special tokens cannot contain tabs or newlines")
+            if not isinstance(token_id, int) or isinstance(token_id, bool):
+                raise ValueError("special token IDs must be integers")
+            if token_id < 0:
+                raise ValueError("special token IDs must be non-negative")
+            if token_id in mergeable_ids:
+                raise ValueError(
+                    f"special token ID {token_id} collides with mergeable vocabulary"
+                )
+            special_ids.append(token_id)
+
+        if len(special_ids) != len(set(special_ids)):
+            raise ValueError("special token IDs must be unique")
+
+        self.special_tokens = dict(special_tokens)
+        self.vocab = self._build_vocab()
 
     def _split_text(self, text: str) -> list[str]:
         """Return independent pieces across which BPE merges may not occur."""
@@ -33,19 +67,55 @@ class BasicTokenizer:
             for pair, count in count_pairs(chunk).items():
                 pair_counts[pair] = pair_counts.get(pair, 0) + count
         return pair_counts
-
+    # a little confusing. train trains on a single string, train_documents trains
+    # train chunks is underlying infra that prevents cross document merges
     def train(
         self,
         text: str,
         vocab_size: int,
         verbose: bool = False,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
+        self._train_chunks(
+            self._split_text(text),
+            vocab_size=vocab_size,
+            verbose=verbose,
+            progress_callback=progress_callback,
+        )
+
+    def train_documents(
+        self,
+        documents: Iterable[str],
+        vocab_size: int,
+        verbose: bool = False,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
+        """Train across documents without permitting cross-document merges."""
+        text_chunks = (
+            chunk
+            for document in documents
+            for chunk in self._split_text(document)
+        )
+        self._train_chunks(
+            text_chunks,
+            vocab_size=vocab_size,
+            verbose=verbose,
+            progress_callback=progress_callback,
+        )
+
+    def _train_chunks(
+        self,
+        text_chunks: Iterable[str],
+        *,
+        vocab_size: int,
+        verbose: bool,
+        progress_callback: ProgressCallback | None,
     ) -> None:
         if vocab_size < 256:
             raise ValueError("vocab_size must be at least 256")
 
         iterations = vocab_size - 256
 
-        text_chunks = self._split_text(text)
         token_chunks = [list(chunk.encode("utf-8")) for chunk in text_chunks]
 
         merges: dict[Pair, int] = {}
@@ -70,6 +140,8 @@ class BasicTokenizer:
                     f"merge {i + 1}/{iterations}: {pair} -> {new_token_id} "
                     f"({vocab[new_token_id]}) had {pair_counts[pair]} occurrences"
                 )
+            if progress_callback is not None:
+                progress_callback(i + 1, iterations)
 
         self.merges = merges
         self.vocab = vocab
@@ -84,7 +156,7 @@ class BasicTokenizer:
         model_file = path + ".model"
         vocab_file = path + ".vocab"
 
-        with open (model_file, 'w') as f:
+        with open(model_file, "w", encoding="utf-8") as f:
             f.write("linkedinlm v1 \n")
             f.write(f"{self.pattern}\n")
 
@@ -127,11 +199,11 @@ class BasicTokenizer:
             if version != "linkedinlm v1":
                 raise ValueError(f"Unsupported model version: {version}")
 
-            self.pattern = f.readline().strip()
+            self.pattern = f.readline().rstrip("\n")
 
             num_special = int(f.readline().strip())
             for _ in range(num_special):
-                special, special_idx = f.readline().strip().split("\t")
+                special, special_idx = f.readline().rstrip("\n").split("\t")
                 special_tokens[special] = int(special_idx)
 
             for line in f:
@@ -139,8 +211,9 @@ class BasicTokenizer:
                 merges[(idx1, idx2)] = idx
                 idx += 1
         self.merges = merges
-        self.special_tokens = special_tokens
-        self.vocab = self._build_vocab()           
+        self.special_tokens = {}
+        self.vocab = self._build_vocab()
+        self.register_special_tokens(special_tokens)
 
     def _encode_chunk(self, text_bytes: bytes) -> list[int]:
         ids = list(text_bytes)
@@ -156,13 +229,68 @@ class BasicTokenizer:
 
         return ids
 
-    def encode(self, text: str) -> list[int]:
+    def encode_ordinary(self, text: str) -> list[int]:
         """
-        Encode independent text pieces as UTF-8 bytes and learned BPE tokens.
+        Encode text without recognizing registered special-token strings.
         """
         token_ids: list[int] = []
         for chunk in self._split_text(text):
             token_ids.extend(self._encode_chunk(chunk.encode("utf-8")))
+        return token_ids
+
+    def encode(
+        self,
+        text: str,
+        *,
+        allowed_special: Literal["all"] | AbstractSet[str] = frozenset(),
+    ) -> list[int]:
+        """Encode text while recognizing only explicitly allowed special tokens."""
+        if not self.special_tokens:
+            return self.encode_ordinary(text)
+
+        registered = set(self.special_tokens)
+        if allowed_special == "all":
+            allowed = registered
+        elif isinstance(allowed_special, AbstractSet):
+            allowed = set(allowed_special)
+            unknown = allowed - registered
+            if unknown:
+                names = ", ".join(sorted(repr(token) for token in unknown))
+                raise ValueError(f"unknown special token(s): {names}")
+        else:
+            raise TypeError(
+                "allowed_special must be 'all' or a set of registered token strings"
+            )
+
+        disallowed = registered - allowed
+        found_disallowed = [
+            (text.find(token), -len(token), token)
+            for token in disallowed
+            if token in text
+        ]
+        if found_disallowed:
+            _, _, token = min(found_disallowed)
+            raise ValueError(
+                f"encountered disallowed special token {token!r}; "
+                "allow it explicitly or call encode_ordinary()"
+            )
+
+        allowed_in_text = [token for token in allowed if token in text]
+        if not allowed_in_text:
+            return self.encode_ordinary(text)
+
+        alternatives = "|".join(
+            re.escape(token)
+            for token in sorted(allowed_in_text, key=lambda token: (-len(token), token))
+        )
+        parts = re.split(f"({alternatives})", text)
+
+        token_ids: list[int] = []
+        for part in parts:
+            if part in allowed:
+                token_ids.append(self.special_tokens[part])
+            else:
+                token_ids.extend(self.encode_ordinary(part))
         return token_ids
 
     def decode(self, token_ids: Sequence[int]) -> str:
